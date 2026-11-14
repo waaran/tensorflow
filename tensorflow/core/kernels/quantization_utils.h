@@ -13,9 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef THIRD_PARTY_TENSORFLOW_CORE_KERNELS_QUANTIZATION_UTILS_H_
-#define THIRD_PARTY_TENSORFLOW_CORE_KERNELS_QUANTIZATION_UTILS_H_
+#ifndef TENSORFLOW_CORE_KERNELS_QUANTIZATION_UTILS_H_
+#define TENSORFLOW_CORE_KERNELS_QUANTIZATION_UTILS_H_
 
+#include <cmath>
 #define EIGEN_USE_THREADS
 
 // This is a set of functions that standardizes how quantized values are
@@ -31,7 +32,7 @@ limitations under the License.
 
 #include <array>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #define GEMMLOWP_ALLOW_SLOW_SCALAR_FALLBACK
 #include "public/gemmlowp.h"
 #include "tensorflow/core/framework/tensor.h"
@@ -42,55 +43,74 @@ namespace tensorflow {
 // We have to be able to detect and handle overflows in int32, so this function
 // uses doubles and int64's to make sure we have enough room.
 template <class T>
-int64 FloatToQuantizedUnclamped(float input, float range_min, float range_max) {
-  const int64 lowest_quantized =
+inline int64_t FloatToQuantizedUnclamped(float input, float range_min,
+                                         float range_max) {
+  const int64_t lowest_quantized =
       static_cast<double>(Eigen::NumTraits<T>::lowest());
   if (range_min == range_max) {
     return lowest_quantized;
   }
   const int number_of_bits = sizeof(T) * 8;
-  const int64 number_of_steps = static_cast<int64>(1) << number_of_bits;
+  const int64_t number_of_steps = static_cast<int64_t>(1) << number_of_bits;
   const double range_adjust = (number_of_steps / (number_of_steps - 1.0));
   const double range = ((range_max - range_min) * range_adjust);
   const double range_scale = (number_of_steps / range);
-  int64 quantized =
+  int64_t quantized =
       (round(input * range_scale) - round(range_min * range_scale));
   quantized += lowest_quantized;
   return quantized;
+}
+
+template <>
+inline int64_t FloatToQuantizedUnclamped<float>(float input, float range_min,
+                                                float range_max) {
+  return -1;
 }
 
 // This converts the float into the final quantized type, clamping/saturating
 // any over or underflows.
 template <class T>
 T FloatToQuantized(float input, float range_min, float range_max) {
-  int64 quantized = FloatToQuantizedUnclamped<T>(input, range_min, range_max);
-  const int64 lowest_quantized =
-      static_cast<int64>(Eigen::NumTraits<T>::lowest());
-  const int64 highest_quantized =
-      static_cast<int64>(Eigen::NumTraits<T>::highest());
+  if (std::is_same_v<T, float>) {
+    // Specialization for float. This is used in reference implementation
+    // for float which is useful to compare performance between float
+    // and quantized type.
+    return input;
+  }
+  int64_t quantized = FloatToQuantizedUnclamped<T>(input, range_min, range_max);
+  const int64_t lowest_quantized =
+      static_cast<int64_t>(Eigen::NumTraits<T>::lowest());
+  const int64_t highest_quantized =
+      static_cast<int64_t>(Eigen::NumTraits<T>::highest());
   quantized = std::max(quantized, lowest_quantized);
   quantized = std::min(quantized, highest_quantized);
-  return static_cast<T>(static_cast<int32>(quantized));
+  return static_cast<T>(static_cast<int32_t>(quantized));
 }
 
 template <class T>
 float QuantizedToFloat(T input, float range_min, float range_max) {
+  if (std::is_same_v<T, float>) {
+    // Specialization for float. This is used in reference implementation
+    // for float which is useful to compare performance between float
+    // and quantized type.
+    return input;
+  }
   if (range_min == range_max) {
     return range_min;
   }
   const int number_of_bits = sizeof(T) * 8;
-  const int64 number_of_steps = static_cast<int64>(1) << number_of_bits;
+  const int64_t number_of_steps = static_cast<int64_t>(1) << number_of_bits;
   const double range_adjust = (number_of_steps / (number_of_steps - 1.0));
   const double range = ((range_max - range_min) * range_adjust);
   const double range_scale = (range / number_of_steps);
-  const int64 lowest_quantized =
-      static_cast<int64>(Eigen::NumTraits<T>::lowest());
+  const int64_t lowest_quantized =
+      static_cast<int64_t>(Eigen::NumTraits<T>::lowest());
   const double offset_input = static_cast<double>(input) - lowest_quantized;
   // For compatibility with DEQUANTIZE_WITH_EIGEN, we should convert
   // range_scale to a float, otherwise range_min_rounded might be slightly
   // different.
   const double range_min_rounded =
-      round(range_min / static_cast<float>(range_scale)) *
+      std::round(range_min / static_cast<float>(range_scale)) *
       static_cast<float>(range_scale);
   const double result = range_min_rounded + (offset_input * range_scale);
   return static_cast<float>(result);
@@ -98,8 +118,8 @@ float QuantizedToFloat(T input, float range_min, float range_max) {
 
 template <class T>
 float FloatForOneQuantizedLevel(float range_min, float range_max) {
-  const int64 highest = static_cast<int64>(Eigen::NumTraits<T>::highest());
-  const int64 lowest = static_cast<int64>(Eigen::NumTraits<T>::lowest());
+  const int64_t highest = static_cast<int64_t>(Eigen::NumTraits<T>::highest());
+  const int64_t lowest = static_cast<int64_t>(Eigen::NumTraits<T>::lowest());
   const float float_for_one_quantized_level =
       (range_max - range_min) / (highest - lowest);
   return float_for_one_quantized_level;
@@ -114,8 +134,9 @@ void QuantizationRangeForMultiplication(float min_a, float max_a, float min_b,
   const float b_float_for_one_quant_level =
       FloatForOneQuantizedLevel<T2>(min_b, max_b);
 
-  const int64 c_highest = static_cast<int64>(Eigen::NumTraits<T3>::highest());
-  const int64 c_lowest = static_cast<int64>(Eigen::NumTraits<T3>::lowest());
+  const int64_t c_highest =
+      static_cast<int64_t>(Eigen::NumTraits<T3>::highest());
+  const int64_t c_lowest = static_cast<int64_t>(Eigen::NumTraits<T3>::lowest());
   const float c_float_for_one_quant_level =
       a_float_for_one_quant_level * b_float_for_one_quant_level;
 
@@ -146,8 +167,8 @@ void QuantizationRangeForMultiplication(float min_a, float max_a, float min_b,
 template <typename T>
 struct QuantizedToFloatStruct {
   static constexpr int number_of_bits = sizeof(T) * 8;
-  static constexpr int64 number_of_steps = static_cast<int64>(1)
-                                           << number_of_bits;
+  static constexpr int64_t number_of_steps = static_cast<int64_t>(1)
+                                             << number_of_bits;
 
   static float lowest_quantized() {
     return static_cast<float>(Eigen::NumTraits<T>::lowest());
@@ -158,7 +179,8 @@ struct QuantizedToFloatStruct {
         range_scale((range_max - range_min) / (number_of_steps - 1.0)),
         range_min_rounded(range_max == range_min
                               ? range_min
-                              : round(range_min / range_scale) * range_scale) {}
+                              : std::round(range_min / range_scale) *
+                                    range_scale) {}
 
   const float range_min;
   const float range_scale;
@@ -169,8 +191,8 @@ struct QuantizedToFloatStruct {
 template <typename T>
 struct FloatToQuantizedStruct {
   static constexpr int number_of_bits = sizeof(T) * 8;
-  static constexpr int64 number_of_steps = static_cast<int64>(1)
-                                           << number_of_bits;
+  static constexpr int64_t number_of_steps = static_cast<int64_t>(1)
+                                             << number_of_bits;
   static constexpr double range_adjust =
       (number_of_steps / (number_of_steps - 1.0));
 
@@ -195,7 +217,7 @@ struct FloatToQuantizedStruct {
         range_scale(range_max == range_min
                         ? 0.0
                         : (number_of_steps - 1.0) / (range_max - range_min)),
-        range_min_scaled(round(range_min * range_scale)) {}
+        range_min_scaled(std::round(range_min * range_scale)) {}
 
   const float range_min;
   const float range_scale;
@@ -210,7 +232,7 @@ inline T2 RequantizeInNewRange(T1 input, float min_input, float max_input,
 }
 
 template <class T1, class T2>
-inline void RequantizeManyInNewRange(const T1* input, int64 count,
+inline void RequantizeManyInNewRange(const T1* input, int64_t count,
                                      float min_input, float max_input,
                                      float min_output, float max_output,
                                      T2* output) {
@@ -224,9 +246,9 @@ inline void RequantizeManyInNewRange(const T1* input, int64 count,
 // Because converting 32-bit accumulated results down to eight bit is a common
 // case, we have a specialized code path to handle it as efficiently as
 // possible using only fixed-point math for the inner loop.
-inline void RequantizeManyInNewRangeReference(const qint32* input, int64 count,
-                                              float min_input, float max_input,
-                                              float min_output,
+inline void RequantizeManyInNewRangeReference(const qint32* input,
+                                              int64_t count, float min_input,
+                                              float max_input, float min_output,
                                               float max_output,
                                               quint8* output) {
   // Initially we calculate all the constants we need once, before we go into
@@ -237,33 +259,32 @@ inline void RequantizeManyInNewRangeReference(const qint32* input, int64 count,
   const float recip_output_range =
       output_range == 0.0 ? 0.0 : (255.0 / output_range);
   const float input_rezero = (min_input + max_input) / 2.0;
-  const int64 range_scale_fp =
+  const int64_t range_scale_fp =
       output_range == 0.0 ? 0.0
-                          : static_cast<int64>(255.0 * (1 << fp_shift) *
-                                               input_range / output_range);
-  const int64 input_offset_fp =
-      static_cast<int64>(input_rezero * recip_output_range * (1 << fp_shift));
-  const int64 output_offset_fp =
+                          : static_cast<int64_t>(255.0 * (1 << fp_shift) *
+                                                 input_range / output_range);
+  const int64_t input_offset_fp =
+      static_cast<int64_t>(input_rezero * recip_output_range * (1 << fp_shift));
+  const int64_t output_offset_fp =
       output_range == 0.0
           ? 0
-          : static_cast<int64>((1 << fp_shift) * (min_output * 255.0) /
-                               output_range);
-  const int64 rounding_delta = 1 << (fp_shift - 1);
+          : std::lround((1 << fp_shift) * (min_output * 255.0) / output_range);
+  const int64_t rounding_delta = 1 << (fp_shift - 1);
 
   // Inside this loop we just do minimal adds, multiplies, and shifts, in a way
   // that could be easily adapted for a SIMD implementation. It should also be
   // possible to perform all the calculations in 32-bit rather than 64, but
   // that's not been implemented yet.
-  for (size_t index = 0; index < count; ++index) {
-    const int64 input_value = static_cast<int64>(input[index]);
-    const int64 fp_value =
+  for (int64_t index = 0; index < count; ++index) {
+    const int64_t input_value = static_cast<int64_t>(input[index]);
+    const int64_t fp_value =
         ((input_value * range_scale_fp) >> 32) + input_offset_fp;
-    const int64 offset_intermediate = fp_value - output_offset_fp;
-    const int64 round_intermediate = offset_intermediate + rounding_delta;
-    int64 quantized_int64 = round_intermediate >> fp_shift;
-    quantized_int64 = std::max(quantized_int64, 0LL);
-    quantized_int64 = std::min(quantized_int64, 255LL);
-    output[index] = static_cast<quint8>(static_cast<int32>(quantized_int64));
+    const int64_t offset_intermediate = fp_value - output_offset_fp;
+    const int64_t round_intermediate = offset_intermediate + rounding_delta;
+    int64_t quantized_int64 = round_intermediate >> fp_shift;
+    quantized_int64 = std::max(quantized_int64, int64_t{0});
+    quantized_int64 = std::min(quantized_int64, int64_t{255});
+    output[index] = static_cast<quint8>(static_cast<int32_t>(quantized_int64));
   }
 }
 
@@ -271,25 +292,25 @@ inline void RequantizeManyInNewRangeReference(const qint32* input, int64 count,
 // we have specialized fixed-point code to accelerate that. There is also a NEON
 // version for ARM devices below.
 inline void RequantizeManyInNewRange8To32BitReference(
-    const quint8* input, int64 count, float min_input, float max_input,
+    const quint8* input, int64_t count, float min_input, float max_input,
     float min_output, float max_output, qint32* output) {
   const float code_0_float = QuantizedToFloat<quint8>(0, min_input, max_input);
   const float code_1_float = QuantizedToFloat<quint8>(1, min_input, max_input);
-  const int64 code_0_int64 =
+  const int64_t code_0_int64 =
       FloatToQuantizedUnclamped<qint32>(code_0_float, min_output, max_output);
-  const int64 code_1_int64 =
+  const int64_t code_1_int64 =
       FloatToQuantizedUnclamped<qint32>(code_1_float, min_output, max_output);
-  const int32 mult_int32 = code_1_int64 - code_0_int64;
-  const int64 lowest_quantized =
-      static_cast<int64>(Eigen::NumTraits<qint32>::lowest());
-  const int64 highest_quantized =
-      static_cast<int64>(Eigen::NumTraits<qint32>::highest());
-  for (int64 i = 0; i < count; ++i) {
-    const int64 input_value = static_cast<int64>(input[i]);
-    int64 output_value = code_0_int64 + (input_value * mult_int32);
+  const int32_t mult_int32 = code_1_int64 - code_0_int64;
+  const int64_t lowest_quantized =
+      static_cast<int64_t>(Eigen::NumTraits<qint32>::lowest());
+  const int64_t highest_quantized =
+      static_cast<int64_t>(Eigen::NumTraits<qint32>::highest());
+  for (int64_t i = 0; i < count; ++i) {
+    const int64_t input_value = static_cast<int64_t>(input[i]);
+    int64_t output_value = code_0_int64 + (input_value * mult_int32);
     output_value = std::max(output_value, lowest_quantized);
     output_value = std::min(output_value, highest_quantized);
-    output[i] = static_cast<int32>(output_value);
+    output[i] = static_cast<int32_t>(output_value);
   }
 }
 
@@ -401,6 +422,132 @@ inline void RequantizeManyInNewRange<qint32, quint8>(
   }
 }
 
+// NEON accelerated 16bit rounded division by 2^n.
+template <int POW>
+inline int16x8_t Divide16x8PowRound(const int16x8_t val) {
+  const int16x8_t val_sign = vshrq_n_s16(val, 15);
+  const int16x8_t val_xor = veorq_s16(val, val_sign);
+  const int16x8_t val_pos = vsubq_s16(val_xor, val_sign);
+  const int16x8_t shifted_val_pos = vrshrq_n_s16(val_pos, POW);
+  const int16x8_t shifted_val_pos_xor = veorq_s16(shifted_val_pos, val_sign);
+  const int16x8_t shifted_val = vsubq_s16(shifted_val_pos_xor, val_sign);
+  return shifted_val;
+}
+
+// NEON accelerated 64bit rounded division by 2^n.
+template <int POW>
+inline int64x2_t Divide64x2PowRound(const int64x2_t val) {
+  const int64x2_t val_sign = vshrq_n_s64(val, 63);
+  const int64x2_t val_xor = veorq_s64(val, val_sign);
+  const int64x2_t val_pos = vsubq_s64(val_xor, val_sign);
+  const int64x2_t shifted_val_pos = vrshrq_n_s64(val_pos, POW);
+  const int64x2_t shifted_val_pos_xor = veorq_s64(shifted_val_pos, val_sign);
+  const int64x2_t shifted_val = vsubq_s64(shifted_val_pos_xor, val_sign);
+  return shifted_val;
+}
+
+// NEON accelerated 16bit division by 2^n.
+// CAVEAT: The input must be greater than min-int16 to avoid underflow.
+template <int POW>
+inline int16x8_t Divide16x8Pow(const int16x8_t val) {
+  static constexpr int16 FIRST_BIT_VAL = 0x0000000000000001;
+  static const int16x8_t FIRST_BIT = vmovq_n_s16(FIRST_BIT_VAL);
+  const int16x8_t val_sign = vshrq_n_s16(val, 15);
+  const int16x8_t neg_offset = vandq_s16(val_sign, FIRST_BIT);
+  const int16x8_t val_with_offset = vsubq_s16(val, neg_offset);
+  const int16x8_t shifted_wo_offset =
+      vsraq_n_s16(neg_offset, val_with_offset, POW);
+  return shifted_wo_offset;
+}
+
+// NEON accelerated 64bit division by 2^n.
+// CAVEAT: The input must be greater than min-int64 to avoid underflow.
+template <int POW>
+inline int64x2_t Divide64x2Pow(const int64x2_t val) {
+  static constexpr int64 FIRST_BIT_VAL = 0x0000000000000001;
+  static const int64x2_t FIRST_BIT = vmovq_n_s64(FIRST_BIT_VAL);
+  const int64x2_t val_sign = vshrq_n_s64(val, 63);
+  const int64x2_t neg_offset = vandq_s64(val_sign, FIRST_BIT);
+  const int64x2_t val_with_offset = vsubq_s64(val, neg_offset);
+  const int64x2_t shifted_wo_offset =
+      vsraq_n_s64(neg_offset, val_with_offset, POW);
+  return shifted_wo_offset;
+}
+
+// 32bit x 2 NEON accelerated lerp computation.
+template <int RESOLUTION>
+inline int32x2_t ComputeLerp32x2(const int32x2_t top_left,
+                                 const int32x2_t top_right,
+                                 const int32x2_t bottom_left,
+                                 const int32x2_t bottom_right,
+                                 const int32x2_t x_lerp,
+                                 const int32x2_t y_lerp) {
+  static_assert(RESOLUTION < 31, "RESOLUTION must be less than 31");
+  constexpr int32 RESOLUTION_MULT32 = (1 << RESOLUTION);
+  static const int32x2_t RESOLUTION_MULT32x2 = vmov_n_s32(RESOLUTION_MULT32);
+
+  const int64x2_t top_left_x_res = vmull_s32(top_left, RESOLUTION_MULT32x2);
+  const int64x2_t bottom_left_x_res =
+      vmull_s32(bottom_left, RESOLUTION_MULT32x2);
+
+  const int32x2_t top_right_sub_top_left = vsub_s32(top_right, top_left);
+  const int64x2_t top_x_res =
+      vmlal_s32(top_left_x_res, top_right_sub_top_left, x_lerp);
+  const int32x2_t bottom_right_sub_bottom_left =
+      vsub_s32(bottom_right, bottom_left);
+  const int64x2_t bottom_x_res =
+      vmlal_s32(bottom_left_x_res, bottom_right_sub_bottom_left, x_lerp);
+
+  const int64x2_t bottom_sub_top_x_res = vsubq_s64(bottom_x_res, top_x_res);
+  const int64x2_t bottom_sub_top =
+      Divide64x2Pow<RESOLUTION>(bottom_sub_top_x_res);
+  const int32x2_t bottom_sub_top_32 = vqmovn_s64(bottom_sub_top);
+  const int64x2_t top_add_bottom_sub_top_mul_ylerp_x_res =
+      vmlal_s32(top_x_res, bottom_sub_top_32, y_lerp);
+  const int64x2_t retval =
+      Divide64x2PowRound<RESOLUTION>(top_add_bottom_sub_top_mul_ylerp_x_res);
+  const int32x2_t retval32 = vqmovn_s64(retval);
+  return retval32;
+}
+
+// 8bit x 8 NEON accelerated lerp computation.
+template <int RESOLUTION>
+inline uint8x8_t ComputeLerp8x8(const uint8x8_t top_left8x8,
+                                const uint8x8_t top_right8x8,
+                                const uint8x8_t bottom_left8x8,
+                                const uint8x8_t bottom_right8x8,
+                                const int16x8_t x_lerp,
+                                const int16x8_t y_lerp) {
+  static_assert(RESOLUTION < 8, "RESOLUTION must be less than 8");
+  constexpr uint8 RESOLUTION_MULT_VAL = (1 << RESOLUTION);
+  static const uint8x8_t RESOLUTION_MULT = vdup_n_u8(RESOLUTION_MULT_VAL);
+
+  const int16x8_t top_left_x_res =
+      vreinterpretq_s16_u16(vmull_u8(top_left8x8, RESOLUTION_MULT));
+  const int16x8_t bottom_left_x_res =
+      vreinterpretq_s16_u16(vmull_u8(bottom_left8x8, RESOLUTION_MULT));
+
+  const int16x8_t top_right_sub_top_left =
+      vreinterpretq_s16_u16(vsubl_u8(top_right8x8, top_left8x8));
+  const int16x8_t top_x_res =
+      vmlaq_s16(top_left_x_res, top_right_sub_top_left, x_lerp);
+
+  const int16x8_t bottom_right_sub_bottom_left =
+      vreinterpretq_s16_u16(vsubl_u8(bottom_right8x8, bottom_left8x8));
+  const int16x8_t bottom_x_res =
+      vmlaq_s16(bottom_left_x_res, bottom_right_sub_bottom_left, x_lerp);
+
+  const int16x8_t bottom_sub_top_x_res = vsubq_s16(bottom_x_res, top_x_res);
+  const int16x8_t bottom_sub_top =
+      Divide16x8Pow<RESOLUTION>(bottom_sub_top_x_res);
+  const int16x8_t top_add_bottom_sub_top_mul_ylerp_x_res =
+      vmlaq_s16(top_x_res, bottom_sub_top, y_lerp);
+  const int16x8_t retval16 =
+      Divide16x8PowRound<RESOLUTION>(top_add_bottom_sub_top_mul_ylerp_x_res);
+  const uint8x8_t retval = vmovn_u16(vreinterpretq_u16_s16(retval16));
+  return retval;
+}
+
 // Requantize 8 x 8 quints to 8 x 32 qints in parallel by neon
 // Return std::array instead of pointer to leverage return value optimization
 inline std::array<int32x4_t, 2> Requantize8x8To32Neon(
@@ -482,12 +629,12 @@ inline void RequantizeManyInNewRange<quint8, qint32>(
 
   // Requantize remaining elements in array without SIMD.
   const int64 lowest_quantized =
-      static_cast<int64>(Eigen::NumTraits<qint32>::lowest());
+      static_cast<int64_t>(Eigen::NumTraits<qint32>::lowest());
   const int64 highest_quantized =
-      static_cast<int64>(Eigen::NumTraits<qint32>::highest());
+      static_cast<int64_t>(Eigen::NumTraits<qint32>::highest());
 
   for (; i < count; ++i) {
-    const int64 input_value = static_cast<int64>(input[i]);
+    const int64 input_value = static_cast<int64_t>(input[i]);
     int64 output_value = code_0_int64 + (input_value * mult_int32);
     output_value = std::max(output_value, lowest_quantized);
     output_value = std::min(output_value, highest_quantized);
@@ -501,7 +648,7 @@ inline void RequantizeManyInNewRange<quint8, qint32>(
 // versions.
 template <>
 inline void RequantizeManyInNewRange<qint32, quint8>(
-    const qint32* input, int64 count, float min_input, float max_input,
+    const qint32* input, int64_t count, float min_input, float max_input,
     float min_output, float max_output, quint8* output) {
   RequantizeManyInNewRangeReference(input, count, min_input, max_input,
                                     min_output, max_output, output);
@@ -509,7 +656,7 @@ inline void RequantizeManyInNewRange<qint32, quint8>(
 
 template <>
 inline void RequantizeManyInNewRange<quint8, qint32>(
-    const quint8* input, int64 count, float min_input, float max_input,
+    const quint8* input, int64_t count, float min_input, float max_input,
     float min_output, float max_output, qint32* output) {
   RequantizeManyInNewRange8To32BitReference(input, count, min_input, max_input,
                                             min_output, max_output, output);
@@ -519,9 +666,8 @@ inline void RequantizeManyInNewRange<quint8, qint32>(
 
 template <int shift>
 struct int64_right_shift_op {
-  EIGEN_EMPTY_STRUCT_CTOR(int64_right_shift_op)
   EIGEN_DEVICE_FUNC
-  EIGEN_STRONG_INLINE const int64 operator()(const int64& a) const {
+  EIGEN_STRONG_INLINE const int64_t operator()(const int64_t a) const {
     return a >> shift;
   }
 };
@@ -557,30 +703,29 @@ inline void RequantizeManyInNewRangeUsingEigen<qint32, quint8>(
   const float recip_output_range =
       output_range == 0.0 ? 0.0 : (255.0 / output_range);
   const float input_rezero = (min_input + max_input) / 2.0;
-  const int64 range_scale_fp =
+  const int64_t range_scale_fp =
       output_range == 0.0 ? 0.0
-                          : static_cast<int64>(255.0 * (1 << fp_shift) *
-                                               input_range / output_range);
-  const int64 input_offset_fp =
-      static_cast<int64>(input_rezero * recip_output_range * (1 << fp_shift));
-  const int64 output_offset_fp =
+                          : static_cast<int64_t>(255.0 * (1 << fp_shift) *
+                                                 input_range / output_range);
+  const int64_t input_offset_fp =
+      static_cast<int64_t>(input_rezero * recip_output_range * (1 << fp_shift));
+  const int64_t output_offset_fp =
       output_range == 0.0
           ? 0
-          : static_cast<int64>((1 << fp_shift) * (min_output * 255.0) /
-                               output_range);
-  const int64 rounding_delta = 1 << (fp_shift - 1);
+          : std::lround((1 << fp_shift) * (min_output * 255.0) / output_range);
+  const int64_t rounding_delta = 1 << (fp_shift - 1);
 
   // Inside this eigen expression we just do minimal adds, multiplies, and
   // shifts. It should be possible to perform all the calculations in 32-bit
   // rather than 64, but that's not been implemented yet.
   auto input_array = input.flat<qint32>();
-  auto fp_value = ((input_array.template cast<int64>() * range_scale_fp)
+  auto fp_value = ((input_array.template cast<int64_t>() * range_scale_fp)
                        .unaryExpr(int64_right_shift_op<32>())) +
                   (input_offset_fp - output_offset_fp + rounding_delta);
   auto intermediate = fp_value.unaryExpr(int64_right_shift_op<fp_shift>());
-  auto input_requantized = intermediate.cwiseMax(0LL)
-                               .cwiseMin(255LL)
-                               .template cast<int32>()
+  auto input_requantized = intermediate.cwiseMax(int64_t{0})
+                               .cwiseMin(int64_t{255})
+                               .template cast<int32_t>()
                                .template cast<quint8>();
   output->flat<quint8>().device(device) = input_requantized;
 }
@@ -682,12 +827,12 @@ void QuantizedAddUsingEigen(const Eigen::ThreadPoolDevice& device,
   const T3 zero_in_total_space =
       FloatToQuantized<T3>(0.0f, *output_min, *output_max);
 
-  const int64 input_element_count = input.NumElements();
-  const int64 smaller_input_element_count = smaller_input.NumElements();
+  const int64_t input_element_count = input.NumElements();
+  const int64_t smaller_input_element_count = smaller_input.NumElements();
 
-  QuantizedToFloatStruct<T1> smaller_input_q2f(smaller_input_min,
+  QuantizedToFloatStruct<T1> input_q2f(input_min, input_max);
+  QuantizedToFloatStruct<T2> smaller_input_q2f(smaller_input_min,
                                                smaller_input_max);
-  QuantizedToFloatStruct<T2> input_q2f(input_min, input_max);
   FloatToQuantizedStruct<T3> f2q(*output_min, *output_max);
 
   auto smaller_input_float =
@@ -728,8 +873,8 @@ void QuantizedAdd(const Eigen::ThreadPoolDevice& device, const Tensor& input,
   const T3 zero_in_total_space =
       FloatToQuantized<T3>(0.0f, *output_min, *output_max);
 
-  const int64 input_element_count = input.NumElements();
-  const int64 smaller_input_element_count = smaller_input.NumElements();
+  const int64_t input_element_count = input.NumElements();
+  const int64_t smaller_input_element_count = smaller_input.NumElements();
 
   float total_min = *output_min;
   float total_max = *output_max;
@@ -759,8 +904,7 @@ void QuantizedAdd(const Eigen::ThreadPoolDevice& device, const Tensor& input,
   }
 }
 
-// See gemmlowp/internal/multi_thread_gemm.h for definitions of
-// Prepare, Wait, StartWorker, and CreateWorkers.
+// See gemmlowp/internal/multi_thread_gemm.h for the semantics of Execute.
 class TensorflowGemmlowpWorkersPool {
  public:
   TensorflowGemmlowpWorkersPool(thread::ThreadPool* workers)
@@ -773,28 +917,25 @@ class TensorflowGemmlowpWorkersPool {
     counter_to_decrement_when_ready_.Reset(0);
   }
 
-  void Prepare(int workers_count) {
-    counter_to_decrement_when_ready_.Reset(workers_count);
-  }
-
-  void Wait() { counter_to_decrement_when_ready_.Wait(); }
-
-  void StartWorker(int index, gemmlowp::Task* task) {
-    CHECK(workers_ != nullptr);
-    // <index> is ignored - the tensorflow threadpool does not support assigning
-    // to a specific thread.
-    workers_->Schedule([this, task]() {
-      // TODO(cwhipkey): get a local_allocator from a thread local.
-      gemmlowp::Allocator local_allocator;
-      CHECK(task != nullptr);
-      task->local_allocator = &local_allocator;
-      task->Run();
+  void Execute(const std::vector<gemmlowp::Task*>& tasks) {
+    assert(!tasks.empty());
+    assert(workers_ != nullptr);
+    counter_to_decrement_when_ready_.Reset(tasks.size());
+    for (gemmlowp::Task* task : tasks) {
+      workers_->Schedule([this, task]() {
+        // TODO(cwhipkey): get a local_allocator from a thread local storage.
+        gemmlowp::Allocator local_allocator;
+        CHECK(task != nullptr);
+        task->local_allocator = &local_allocator;
+        task->Run();
+        counter_to_decrement_when_ready_.DecrementCount();
+      });
+    }
+    counter_to_decrement_when_ready_.Wait();
+    for (gemmlowp::Task* task : tasks) {
       delete task;
-      counter_to_decrement_when_ready_.DecrementCount();
-    });
+    }
   }
-
-  void CreateWorkers(std::size_t workers_count) {}
 
  private:
   thread::ThreadPool* const workers_;
@@ -802,7 +943,8 @@ class TensorflowGemmlowpWorkersPool {
   // The BlockingCounter used to wait for the workers.
   gemmlowp::BlockingCounter counter_to_decrement_when_ready_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(TensorflowGemmlowpWorkersPool);
+  TensorflowGemmlowpWorkersPool(const TensorflowGemmlowpWorkersPool&) = delete;
+  void operator=(const TensorflowGemmlowpWorkersPool&) = delete;
 };
 
 class TensorflowGemmContext : public gemmlowp::MultiThreadGemmContextBase {
@@ -817,9 +959,10 @@ class TensorflowGemmContext : public gemmlowp::MultiThreadGemmContextBase {
  private:
   TensorflowGemmlowpWorkersPool workers_pool_;
 
-  TF_DISALLOW_COPY_AND_ASSIGN(TensorflowGemmContext);
+  TensorflowGemmContext(const TensorflowGemmContext&) = delete;
+  void operator=(const TensorflowGemmContext&) = delete;
 };
 
 }  // namespace tensorflow
 
-#endif  // THIRD_PARTY_TENSORFLOW_CORE_KERNELS_QUANTIZATION_UTILS_H_
+#endif  // TENSORFLOW_CORE_KERNELS_QUANTIZATION_UTILS_H_

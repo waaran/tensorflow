@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/core/grappler/optimizers/static_schedule.h"
+
 #include "tensorflow/cc/ops/standard_ops.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/grappler/clusters/virtual_cluster.h"
@@ -29,7 +30,7 @@ namespace {
 
 class StaticScheduleTest : public ::testing::Test {
  public:
-  VirtualCluster CreateVirtualCluster() const {
+  std::unique_ptr<VirtualCluster> CreateVirtualCluster() const {
     // Invent a CPU so that predictions remain the same from machine to machine.
     DeviceProperties cpu_device;
     cpu_device.set_type("CPU");
@@ -39,11 +40,47 @@ class StaticScheduleTest : public ::testing::Test {
     cpu_device.set_l1_cache_size(32 * 1024);
     cpu_device.set_l2_cache_size(256 * 1024);
     cpu_device.set_l3_cache_size(4 * 1024 * 1024);
-    std::unordered_map<string, DeviceProperties> devices;
+    std::unordered_map<std::string, DeviceProperties> devices;
     devices["/job:localhost/replica:0/task:0/cpu:0"] = cpu_device;
-    return VirtualCluster(devices);
+    return std::unique_ptr<VirtualCluster>(new VirtualCluster(devices));
   }
 };
+
+// Returns the completion times of the nodes in completion order.
+std::vector<Costs::NanoSeconds> GetOrderedTimes(
+    const std::unordered_map<const NodeDef*, Costs::NanoSeconds>
+        completion_times) {
+  std::map<Costs::NanoSeconds, std::string> ordered_completion_times;
+  for (const auto& node_def_time : completion_times) {
+    ordered_completion_times[node_def_time.second] =
+        node_def_time.first->name();
+  }
+
+  std::vector<Costs::NanoSeconds> ordered_times;
+  for (const auto& time_node_name : ordered_completion_times) {
+    ordered_times.push_back(time_node_name.first);
+  }
+
+  return ordered_times;
+}
+
+// Returns the names of the completed nodes in completion order.
+std::vector<std::string> GetOrderedNodeNames(
+    const std::unordered_map<const NodeDef*, Costs::NanoSeconds>
+        completion_times) {
+  std::map<Costs::NanoSeconds, std::string> ordered_completion_times;
+  for (const auto& node_def_time : completion_times) {
+    ordered_completion_times[node_def_time.second] =
+        node_def_time.first->name();
+  }
+
+  std::vector<std::string> ordered_node_names;
+  for (const auto& time_node_name : ordered_completion_times) {
+    ordered_node_names.push_back(time_node_name.second);
+  }
+
+  return ordered_node_names;
+}
 
 TEST_F(StaticScheduleTest, BasicGraph) {
   // This trivial graph is so basic there's nothing to prune.
@@ -51,32 +88,31 @@ TEST_F(StaticScheduleTest, BasicGraph) {
   GrapplerItem item;
   CHECK(fake_input.NextItem(&item));
 
-  VirtualCluster cluster(CreateVirtualCluster());
+  std::unique_ptr<VirtualCluster> cluster(CreateVirtualCluster());
 
   std::unordered_map<const NodeDef*, Costs::NanoSeconds> completion_times;
-  Status status =
-      EstimateEarliestExecutionTimes(item, &cluster, &completion_times);
+  absl::Status status =
+      EstimateEarliestExecutionTimes(item, cluster.get(), &completion_times);
   TF_EXPECT_OK(status);
 
   EXPECT_EQ(item.graph.node_size(), completion_times.size());
 
-  for (auto time : completion_times) {
-    if (time.first->name() == "Const/Const") {
-      EXPECT_EQ(Costs::NanoSeconds(1), time.second);
-    } else if (time.first->name() == "x") {
-      EXPECT_EQ(Costs::NanoSeconds(250001), time.second);
-    } else if (time.first->name() == "AddN") {
-      EXPECT_EQ(Costs::NanoSeconds(1500001), time.second);
-    } else if (time.first->name() == "AddN_1") {
-      EXPECT_EQ(Costs::NanoSeconds(2750001), time.second);
-    } else if (time.first->name() == "AddN_2") {
-      EXPECT_EQ(Costs::NanoSeconds(4000001), time.second);
-    } else if (time.first->name() == "AddN_3") {
-      EXPECT_EQ(Costs::NanoSeconds(5250001), time.second);
-    } else if (time.first->name() == "y") {
-      EXPECT_EQ(Costs::NanoSeconds(6500001), time.second);
+  // Check that the completion times are strictly ascending, starting at 1.
+  std::vector<Costs::NanoSeconds> ordered_times =
+      GetOrderedTimes(completion_times);
+  for (int i = 0; i < ordered_times.size(); ++i) {
+    if (i > 0) {
+      EXPECT_GT(ordered_times[i], ordered_times[i - 1]);
     }
   }
+  EXPECT_EQ(ordered_times[0], Costs::NanoSeconds(1));
+
+  // Check that the completions schedule is as expected.
+  std::vector<std::string> ordered_node_names =
+      GetOrderedNodeNames(completion_times);
+  EXPECT_EQ(ordered_node_names,
+            (std::vector<std::string>{"Const/Const", "x", "Sign", "Sign_1",
+                                      "Sign_2", "Sign_3", "y"}));
 }
 
 TEST_F(StaticScheduleTest, BasicGraphWithCtrlDependencies) {
@@ -97,28 +133,67 @@ TEST_F(StaticScheduleTest, BasicGraphWithCtrlDependencies) {
   EXPECT_EQ("e", item.graph.node(4).name());
   *item.graph.mutable_node(4)->add_input() = "^c";
 
-  VirtualCluster cluster(CreateVirtualCluster());
+  std::unique_ptr<VirtualCluster> cluster(CreateVirtualCluster());
 
   std::unordered_map<const NodeDef*, Costs::NanoSeconds> completion_times;
-  Status status =
-      EstimateEarliestExecutionTimes(item, &cluster, &completion_times);
+  absl::Status status =
+      EstimateEarliestExecutionTimes(item, cluster.get(), &completion_times);
   TF_EXPECT_OK(status);
 
   EXPECT_EQ(item.graph.node_size(), completion_times.size());
 
-  for (auto time : completion_times) {
-    if (time.first->name() == "a") {
-      EXPECT_EQ(Costs::NanoSeconds(1), time.second);
-    } else if (time.first->name() == "b") {
-      EXPECT_EQ(Costs::NanoSeconds(12500001), time.second);
-    } else if (time.first->name() == "c") {
-      EXPECT_EQ(Costs::NanoSeconds(12500002), time.second);
-    } else if (time.first->name() == "d") {
-      EXPECT_EQ(Costs::NanoSeconds(12500003), time.second);
-    } else if (time.first->name() == "e") {
-      EXPECT_EQ(Costs::NanoSeconds(25000003), time.second);
+  // Check that the completion times are strictly ascending, starting at 1.
+  std::vector<Costs::NanoSeconds> ordered_times =
+      GetOrderedTimes(completion_times);
+  for (int i = 0; i < ordered_times.size(); ++i) {
+    if (i > 0) {
+      EXPECT_GT(ordered_times[i], ordered_times[i - 1]);
     }
   }
+  EXPECT_EQ(ordered_times[0], Costs::NanoSeconds(1));
+
+  // Check that the completions schedule is as expected.
+  std::vector<std::string> ordered_node_names =
+      GetOrderedNodeNames(completion_times);
+  EXPECT_EQ(ordered_node_names,
+            (std::vector<std::string>{"a", "b", "c", "d", "e"}));
+}
+
+TEST_F(StaticScheduleTest, RequiredTimes) {
+  // This trivial graph is so basic there's nothing to prune.
+  TrivialTestGraphInputYielder fake_input(4, 1, 10, false, {"CPU:0"});
+  GrapplerItem item;
+  CHECK(fake_input.NextItem(&item));
+
+  std::unique_ptr<VirtualCluster> cluster(CreateVirtualCluster());
+
+  std::unordered_map<const NodeDef*, Costs::NanoSeconds> execution_times;
+  for (const NodeDef& node : item.graph.node()) {
+    execution_times[&node] = 0;
+  }
+  std::unordered_map<const NodeDef*, Costs::NanoSeconds> required_times;
+  absl::Status status = EstimateRequiredTimes(item, cluster.get(),
+                                              execution_times, &required_times);
+  TF_EXPECT_OK(status);
+
+  EXPECT_EQ(item.graph.node_size(), required_times.size());
+
+  // Check that the expecution times are strictly ascending, ending at 0.
+  std::vector<Costs::NanoSeconds> ordered_times =
+      GetOrderedTimes(required_times);
+  for (int i = 0; i < ordered_times.size(); ++i) {
+    if (i > 0) {
+      EXPECT_GT(ordered_times[i], ordered_times[i - 1]);
+    }
+  }
+  EXPECT_EQ(ordered_times[ordered_times.size() - 1], Costs::NanoSeconds(0));
+
+  // Check that the completions schedule is as expected.
+  std::vector<std::string> ordered_node_names =
+      GetOrderedNodeNames(required_times);
+  EXPECT_EQ(ordered_node_names,
+            (std::vector<std::string>{"Const/Const", "x", "Sign", "Sign_1",
+                                      "Sign_2", "Sign_3", "y"}));
 }
 
 }  // namespace

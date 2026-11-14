@@ -13,9 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_GRAPPLER_OPTIMIZERS_AUTO_PARALLEL_H_
-#define TENSORFLOW_GRAPPLER_OPTIMIZERS_AUTO_PARALLEL_H_
+#ifndef TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_AUTO_PARALLEL_H_
+#define TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_AUTO_PARALLEL_H_
 
+#include "tensorflow/core/framework/variable.pb.h"
 #include "tensorflow/core/grappler/optimizers/graph_optimizer.h"
 #include "tensorflow/core/lib/core/status.h"
 
@@ -28,32 +29,31 @@ class AutoParallel : public GraphOptimizer {
   AutoParallel(int num_replicas) : num_replicas_(num_replicas) {
     CHECK(num_replicas_ >= 2);
   }
-  ~AutoParallel() override {}
+  ~AutoParallel() override = default;
 
-  string name() const override { return "autoparallel"; };
+  std::string name() const override { return "autoparallel"; };
 
-  Status Optimize(Cluster* cluster, const GrapplerItem& item,
-                  GraphDef* output) override;
+  bool UsesFunctionLibrary() const override { return false; }
 
-  void Feedback(Cluster* cluster, const GrapplerItem& item,
-                const GraphDef& optimize_output, double result) override;
+  absl::Status Optimize(Cluster* cluster, const GrapplerItem& item,
+                        GraphDef* output) override;
 
  private:
   GraphDef graph_;
-  std::map<string, NodeDef*> all_nodes_;
-  std::set<string> apply_gradients_nodes_;
-  std::set<string> replica_nodes_;
-  std::set<string> shared_nodes_;
+  std::map<std::string, NodeDef*> all_nodes_;
+  std::set<std::string> apply_gradients_nodes_;
+  std::set<std::string> replica_nodes_;
+  std::set<std::string> shared_nodes_;
   const GrapplerItem* item_;
   int num_replicas_;
   int num_gpus_;
-  Status Initialize(const GrapplerItem& item);
+  absl::Status Initialize(const GrapplerItem& item);
   NodeDef* AddNodeDivConst();
-  NodeDef* AddNodeDiv(const string& name, const string& input_a,
-                      const string& input_b);
-  NodeDef* AddNodeControl(const string& name, const std::set<string>& deps,
-                          GraphDef* graph);
-  bool NotSharedNode(const string& name);
+  NodeDef* AddNodeDiv(const std::string& name, const std::string& input_a,
+                      const std::string& input_b);
+  NodeDef* AddNodeControl(const std::string& name,
+                          const std::set<std::string>& deps, GraphDef* graph);
+  bool NotSharedNode(const std::string& name);
   void AddSharedNodes(GraphDef* graph);
   void AddOneReplica(GraphDef* graph, int number);
   void BuildGraph(GraphDef* graph);
@@ -62,4 +62,4 @@ class AutoParallel : public GraphOptimizer {
 }  // end namespace grappler
 }  // end namespace tensorflow
 
-#endif  // TENSORFLOW_GRAPPLER_OPTIMIZERS_AUTO_PARALLEL_H_
+#endif  // TENSORFLOW_CORE_GRAPPLER_OPTIMIZERS_AUTO_PARALLEL_H_

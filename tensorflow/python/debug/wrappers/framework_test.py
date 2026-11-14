@@ -13,17 +13,14 @@
 # limitations under the License.
 # ==============================================================================
 """Framework of debug-wrapped sessions."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
-import shutil
 import tempfile
 import threading
 
 import numpy as np
 
+from tensorflow.core.protobuf import config_pb2
+from tensorflow.core.protobuf import rewriter_config_pb2
 from tensorflow.python.client import session
 from tensorflow.python.debug.lib import debug_data
 from tensorflow.python.debug.wrappers import framework
@@ -32,12 +29,15 @@ from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
 from tensorflow.python.framework import ops
 from tensorflow.python.framework import test_util
+from tensorflow.python.lib.io import file_io
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 # Import resource_variable_ops for the variables-to-tensor implicit conversion.
 from tensorflow.python.ops import resource_variable_ops  # pylint: disable=unused-import
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import googletest
+from tensorflow.python.training import monitored_session
+from tensorflow.python.util import tf_inspect
 
 
 class TestDebugWrapperSession(framework.BaseDebugWrapperSession):
@@ -137,7 +137,14 @@ class TestDebugWrapperSessionBadAction(framework.BaseDebugWrapperSession):
     return framework.OnRunEndResponse()
 
 
+@test_util.run_v1_only("Sessions are not available in TF 2.x")
 class DebugWrapperSessionTest(test_util.TensorFlowTestCase):
+
+  def _no_rewrite_session_config(self):
+    rewriter_config = rewriter_config_pb2.RewriterConfig(
+        disable_model_pruning=True)
+    graph_options = config_pb2.GraphOptions(rewrite_options=rewriter_config)
+    return config_pb2.ConfigProto(graph_options=graph_options)
 
   def setUp(self):
     self._observer = {
@@ -153,7 +160,7 @@ class DebugWrapperSessionTest(test_util.TensorFlowTestCase):
 
     self._dump_root = tempfile.mkdtemp()
 
-    self._sess = session.Session()
+    self._sess = session.Session(config=self._no_rewrite_session_config())
 
     self._a_init_val = np.array([[5.0, 3.0], [-1.0, 0.0]])
     self._b_init_val = np.array([[2.0], [-1.0]])
@@ -186,7 +193,7 @@ class DebugWrapperSessionTest(test_util.TensorFlowTestCase):
   def tearDown(self):
     # Tear down temporary dump directory.
     if os.path.isdir(self._dump_root):
-      shutil.rmtree(self._dump_root)
+      file_io.delete_recursively(self._dump_root)
 
     ops.reset_default_graph()
 
@@ -215,7 +222,7 @@ class DebugWrapperSessionTest(test_util.TensorFlowTestCase):
       wrapper_sess.partial_run_setup(self._p)
 
   def testInteractiveSessionInit(self):
-    """The wrapper should work also on other subclassses of session.Session."""
+    """The wrapper should work also on other subclasses of session.Session."""
 
     TestDebugWrapperSession(
         session.InteractiveSession(), self._dump_root, self._observer)
@@ -262,11 +269,11 @@ class DebugWrapperSessionTest(test_util.TensorFlowTestCase):
     """Attempt to wrap a non-Session-type object should cause an exception."""
 
     wrapper = TestDebugWrapperSessionBadAction(self._sess)
-    with self.assertRaisesRegexp(TypeError, "Expected type .*; got type .*"):
+    with self.assertRaisesRegex(TypeError, "Expected type .*; got type .*"):
       TestDebugWrapperSessionBadAction(wrapper)
 
   def testSessionInitBadActionValue(self):
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         ValueError, "Invalid OnSessionInitAction value: nonsense_action"):
       TestDebugWrapperSessionBadAction(
           self._sess, bad_init_action="nonsense_action")
@@ -275,7 +282,7 @@ class DebugWrapperSessionTest(test_util.TensorFlowTestCase):
     wrapper = TestDebugWrapperSessionBadAction(
         self._sess, bad_run_start_action="nonsense_action")
 
-    with self.assertRaisesRegexp(
+    with self.assertRaisesRegex(
         ValueError, "Invalid OnRunStartAction value: nonsense_action"):
       wrapper.run(self._s)
 
@@ -285,7 +292,7 @@ class DebugWrapperSessionTest(test_util.TensorFlowTestCase):
     wrapper = TestDebugWrapperSessionBadAction(
         self._sess, bad_debug_urls="file://foo")
 
-    with self.assertRaisesRegexp(TypeError, "Expected type .*; got type .*"):
+    with self.assertRaisesRegex(TypeError, "Expected type .*; got type .*"):
       wrapper.run(self._s)
 
   def testErrorDuringRun(self):
@@ -311,7 +318,17 @@ class DebugWrapperSessionTest(test_util.TensorFlowTestCase):
                                       self._observer)
 
     with wrapper as sess:
-      sess.run(self._s)
+      self.assertAllClose([[3.0], [4.0]], self._s)
+      self.assertEqual(1, self._observer["on_run_start_count"])
+      self.assertEqual([self._s], self._observer["run_fetches"])
+      self.assertEqual(1, self._observer["on_run_end_count"])
+
+      self.assertAllClose(
+          [[11.0], [-1.0]],
+          sess.run(self._q, feed_dict={self._ph: np.array([[1.0], [2.0]])}))
+      self.assertEqual(2, self._observer["on_run_start_count"])
+      self.assertEqual(self._q, self._observer["run_fetches"])
+      self.assertEqual(2, self._observer["on_run_end_count"])
 
   def testUsingWrappedSessionShouldSupportEvalWithAsDefault(self):
     wrapper = TestDebugWrapperSession(self._sess, self._dump_root,
@@ -319,8 +336,8 @@ class DebugWrapperSessionTest(test_util.TensorFlowTestCase):
 
     with wrapper.as_default():
       foo = constant_op.constant(42, name="foo")
-      self.assertEqual(42, foo.eval())
-      self.assertEqual(foo, self._observer["run_fetches"])
+      self.assertEqual(42, self.evaluate(foo))
+      self.assertEqual([foo], self._observer["run_fetches"])
 
   def testWrapperShouldSupportSessionClose(self):
     wrapper = TestDebugWrapperSession(self._sess, self._dump_root,
@@ -385,6 +402,45 @@ class DebugWrapperSessionTest(test_util.TensorFlowTestCase):
     self.assertItemsEqual(
         ["a_init", "b_init"],
         [datum.node_name for datum in dump.dumped_tensor_data])
+
+
+def _is_public_method_name(method_name):
+  return (method_name.startswith("__") and method_name.endswith("__")
+          or not method_name.startswith("_"))
+
+
+class SessionWrapperPublicMethodParityTest(test_util.TensorFlowTestCase):
+
+  def testWrapperHasAllPublicMethodsOfSession(self):
+    session_public_methods = [
+        method_tuple[0] for method_tuple in
+        tf_inspect.getmembers(session.Session, predicate=tf_inspect.ismethod)
+        if _is_public_method_name(method_tuple[0])]
+    wrapper_public_methods = [
+        method_tuple[0] for method_tuple in
+        tf_inspect.getmembers(
+            framework.BaseDebugWrapperSession, predicate=tf_inspect.ismethod)
+        if _is_public_method_name(method_tuple[0])]
+    missing_public_methods = [
+        method for method in session_public_methods
+        if method not in wrapper_public_methods]
+    self.assertFalse(missing_public_methods)
+
+  def testWrapperHasAllPublicMethodsOfMonitoredSession(self):
+    session_public_methods = [
+        method_tuple[0] for method_tuple in
+        tf_inspect.getmembers(monitored_session.MonitoredSession,
+                              predicate=tf_inspect.ismethod)
+        if _is_public_method_name(method_tuple[0])]
+    wrapper_public_methods = [
+        method_tuple[0] for method_tuple in
+        tf_inspect.getmembers(
+            framework.BaseDebugWrapperSession, predicate=tf_inspect.ismethod)
+        if _is_public_method_name(method_tuple[0])]
+    missing_public_methods = [
+        method for method in session_public_methods
+        if method not in wrapper_public_methods]
+    self.assertFalse(missing_public_methods)
 
 
 if __name__ == "__main__":

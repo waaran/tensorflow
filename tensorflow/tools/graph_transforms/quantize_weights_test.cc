@@ -29,9 +29,9 @@ namespace tensorflow {
 namespace graph_transforms {
 
 // Declare here, so we don't need a public header.
-Status QuantizeWeights(const GraphDef& input_graph_def,
-                       const TransformFuncContext& context,
-                       GraphDef* output_graph_def);
+absl::Status QuantizeWeights(const GraphDef& input_graph_def,
+                             const TransformFuncContext& context,
+                             GraphDef* output_graph_def);
 
 class QuantizeWeightsTest : public ::testing::Test {
  protected:
@@ -40,7 +40,7 @@ class QuantizeWeightsTest : public ::testing::Test {
                      const TensorShape& weight_shape,
                      std::initializer_list<float> weight_values,
                      GraphDef* original_graph_def) {
-    auto root = tensorflow::Scope::NewRootScope();
+    auto root = tensorflow::Scope::DisabledShapeInferenceScope();
 
     Tensor input_data(DT_FLOAT, input_shape);
     test::FillValues<float>(&input_data, input_values);
@@ -70,12 +70,15 @@ class QuantizeWeightsTest : public ::testing::Test {
                    0.3f, 0.4f, 1.0f, 2.0f, 3.0f, 4.0f, 0.1f, 0.2f, 0.3f, 0.4f},
                   &original_graph_def);
 
+    TransformFuncContext context;
+    context.output_names = {"output"};
+    context.params["minimum_size"] = {"16"};
     GraphDef quantized_graph_def;
-    TF_ASSERT_OK(QuantizeWeights(original_graph_def, {{}, {"output"}},
-                                 &quantized_graph_def));
+    TF_ASSERT_OK(
+        QuantizeWeights(original_graph_def, context, &quantized_graph_def));
 
     // Verify the structure of the quantized graph.
-    std::map<string, const NodeDef*> node_lookup;
+    std::map<std::string, const NodeDef*> node_lookup;
     MapNamesToNodes(quantized_graph_def, &node_lookup);
     EXPECT_EQ(1, node_lookup.count("input_op"));
     const NodeDef* q_input_op = node_lookup.at("input_op");
@@ -83,20 +86,20 @@ class QuantizeWeightsTest : public ::testing::Test {
     EXPECT_EQ(1, node_lookup.count("weights_op"));
     const NodeDef* q_weights_op = node_lookup.at("weights_op");
     EXPECT_EQ("Dequantize", q_weights_op->op());
-    const string& weights_const_name =
+    const std::string& weights_const_name =
         NodeNameFromInput(q_weights_op->input(0));
     EXPECT_EQ(1, node_lookup.count(weights_const_name));
     const NodeDef* q_weights_const = node_lookup.at(weights_const_name);
     EXPECT_EQ("Const", q_weights_const->op());
     EXPECT_EQ(DT_QUINT8, q_weights_const->attr().at("dtype").type());
 
-    // Run the the original graph.
+    // Run the original graph.
     std::unique_ptr<Session> original_session(NewSession(SessionOptions()));
     TF_ASSERT_OK(original_session->Create(original_graph_def));
     std::vector<Tensor> original_outputs;
     TF_ASSERT_OK(original_session->Run({}, {"output"}, {}, &original_outputs));
 
-    // Run the the quantized graph.
+    // Run the quantized graph.
     std::unique_ptr<Session> quantized_session(NewSession(SessionOptions()));
     TF_ASSERT_OK(quantized_session->Create(quantized_graph_def));
     std::vector<Tensor> quantized_outputs;
@@ -122,11 +125,14 @@ TEST_F(QuantizeWeightsTest, RangesAlwaysIncludeZero) {
                  0.1f, 0.2f, 0.3f, 0.4f, 1.0f, 2.0f, 3.0f, 4.0f, 0.1f, 0.2f,
                  0.3f, 0.4f, 1.0f, 2.0f, 3.0f, 4.0f, 0.1f, 0.2f, 0.3f, 0.4f},
                 &original_graph_def);
+  TransformFuncContext context;
+  context.output_names = {"output"};
+  context.params["minimum_size"] = {"16"};
   GraphDef quantized_graph_def;
-  TF_ASSERT_OK(QuantizeWeights(original_graph_def, {{}, {"output"}},
-                               &quantized_graph_def));
+  TF_ASSERT_OK(
+      QuantizeWeights(original_graph_def, context, &quantized_graph_def));
 
-  std::map<string, const NodeDef*> node_lookup;
+  std::map<std::string, const NodeDef*> node_lookup;
   MapNamesToNodes(quantized_graph_def, &node_lookup);
 
   auto expected_tensor = [](float value) {
@@ -134,7 +140,7 @@ TEST_F(QuantizeWeightsTest, RangesAlwaysIncludeZero) {
     test::FillValues<float>(&tensor, {value});
     return tensor;
   };
-  auto existing_tensor = [&node_lookup](string op) {
+  auto existing_tensor = [&node_lookup](std::string op) {
     const NodeDef* node_def = node_lookup.at(op);
     CHECK(node_def);
     return GetNodeTensorAttr(*node_def, "value");

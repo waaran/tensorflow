@@ -14,7 +14,9 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/core/grappler/optimizers/static_schedule.h"
+
 #include <deque>
+
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/grappler/costs/graph_properties.h"
 #include "tensorflow/core/grappler/costs/op_level_cost_estimator.h"
@@ -30,30 +32,36 @@ namespace grappler {
 static Costs::NanoSeconds PredictExecutionTime(
     const GraphProperties& properties, const OpLevelCostEstimator& estimator,
     const VirtualPlacer& placer, const NodeDef& node) {
-  OpInfo op_features;
-  op_features.set_op(node.op());
-  *op_features.mutable_attr() = node.attr();
+  OpContext op_context;
+  op_context.op_info.set_op(node.op());
+  *op_context.op_info.mutable_attr() = node.attr();
 
   std::vector<OpInfo::TensorProperties> inputs =
       properties.GetInputProperties(node.name());
   for (auto& input : inputs) {
-    op_features.add_inputs()->Swap(&input);
+    op_context.op_info.add_inputs()->Swap(&input);
+  }
+
+  std::vector<OpInfo::TensorProperties> outputs =
+      properties.GetOutputProperties(node.name());
+  for (auto& output : outputs) {
+    op_context.op_info.add_outputs()->Swap(&output);
   }
 
   DeviceProperties device = placer.get_device(node);
-  op_features.mutable_device()->Swap(&device);
+  op_context.op_info.mutable_device()->Swap(&device);
 
   Costs::NanoSeconds estimate =
-      estimator.PredictCosts(op_features).execution_time;
+      estimator.PredictCosts(op_context).execution_time;
 
   // Make sure our estimates are at least one nanosecond per node.
   return std::max(estimate, Costs::NanoSeconds(1));
 }
 
-Status EstimateEarliestExecutionTimes(
+absl::Status EstimateEarliestExecutionTimes(
     const GrapplerItem& item, const Cluster* cluster,
     std::unordered_map<const NodeDef*, Costs::NanoSeconds>* completion_times) {
-  std::unordered_map<string, const NodeDef*> name_map;
+  std::unordered_map<std::string, const NodeDef*> name_map;
   std::unordered_map<const NodeDef*, int> pending_inputs;
   std::deque<const NodeDef*> ready_nodes;
   for (const NodeDef& node : item.graph.node()) {
@@ -72,12 +80,12 @@ Status EstimateEarliestExecutionTimes(
 
   std::unordered_map<const NodeDef*, std::vector<const NodeDef*>> fanouts;
   for (const NodeDef& node : item.graph.node()) {
-    for (const string& input : node.input()) {
-      string node_name = NodeName(input);
+    for (const std::string& input : node.input()) {
+      std::string node_name = NodeName(input);
       auto it = name_map.find(node_name);
       if (it == name_map.end()) {
-        return errors::InvalidArgument(
-            strings::StrCat("Unknown input node ", input));
+        return absl::InvalidArgumentError(
+            absl::StrCat("Unknown input node ", input));
       }
       const NodeDef* fanin = it->second;
       fanouts[fanin].push_back(&node);
@@ -86,9 +94,12 @@ Status EstimateEarliestExecutionTimes(
   name_map.clear();
 
   GraphProperties properties(item);
-  TF_RETURN_IF_ERROR(properties.InferStatically());
+  TF_RETURN_IF_ERROR(
+      properties.InferStatically(/*assume_valid_feeds=*/true,
+                                 /*aggressive_shape_inference=*/false,
+                                 /*include_tensor_values=*/false));
   OpLevelCostEstimator estimator;
-  VirtualPlacer placer(cluster);
+  VirtualPlacer placer(cluster->GetDevices());
 
   while (!ready_nodes.empty()) {
     const NodeDef* node = ready_nodes.front();
@@ -116,7 +127,76 @@ Status EstimateEarliestExecutionTimes(
     }
   }
 
-  return Status::OK();
+  return absl::OkStatus();
+}
+
+absl::Status EstimateRequiredTimes(
+    const GrapplerItem& item, const Cluster* cluster,
+    const std::unordered_map<const NodeDef*, Costs::NanoSeconds>&
+        execution_times,
+    std::unordered_map<const NodeDef*, Costs::NanoSeconds>* required_times) {
+  std::unordered_map<std::string, const NodeDef*> name_map;
+  for (const NodeDef& node : item.graph.node()) {
+    name_map[node.name()] = &node;
+    (*required_times)[&node] = Costs::NanoSeconds::max();
+  }
+
+  std::unordered_map<const NodeDef*, int> pending_fanouts;
+  for (const NodeDef& node : item.graph.node()) {
+    for (const std::string& input : node.input()) {
+      std::string node_name = NodeName(input);
+      auto it = name_map.find(node_name);
+      if (it == name_map.end()) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("Unknown input node ", input));
+      }
+      const NodeDef* fanin = it->second;
+      pending_fanouts[fanin] += 1;
+    }
+  }
+  std::deque<const NodeDef*> ready_nodes;
+  for (const NodeDef& node : item.graph.node()) {
+    if (pending_fanouts[&node] == 0) {
+      auto it = execution_times.find(&node);
+      if (it != execution_times.end()) {
+        (*required_times)[&node] = it->second;
+      }
+      ready_nodes.push_back(&node);
+    }
+  }
+  GraphProperties properties(item);
+  TF_RETURN_IF_ERROR(
+      properties.InferStatically(/*assume_valid_feeds=*/true,
+                                 /*aggressive_shape_inference=*/false,
+                                 /*include_tensor_values=*/false));
+  OpLevelCostEstimator estimator;
+  VirtualPlacer placer(cluster->GetDevices());
+
+  while (!ready_nodes.empty()) {
+    const NodeDef* node = ready_nodes.front();
+    ready_nodes.pop_front();
+
+    Costs::NanoSeconds execution_time =
+        PredictExecutionTime(properties, estimator, placer, *node);
+    Costs::NanoSeconds required_time = (*required_times)[node] - execution_time;
+
+    for (const std::string& fanin_name : node->input()) {
+      const NodeDef* fanin = name_map[NodeName(fanin_name)];
+      (*required_times)[fanin] =
+          std::min((*required_times)[fanin], required_time);
+
+      int pending = pending_fanouts[fanin];
+      if (pending == 0) {
+        // Already processed. Avoid going through loops more than once.
+        continue;
+      } else if (pending == 1) {
+        ready_nodes.push_back(fanin);
+      }
+      pending_fanouts[fanin]--;
+    }
+  }
+
+  return absl::OkStatus();
 }
 
 }  // end namespace grappler

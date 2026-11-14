@@ -13,12 +13,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <cmath>
 #define EIGEN_USE_THREADS
 
 #include <limits>
 
-#include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
-#include "tensorflow/core/common_runtime/eigen_thread_pool.h"
+#include "unsupported/Eigen/CXX11/Tensor"  // from @eigen_archive
 #include "tensorflow/core/framework/allocator.h"
 #include "tensorflow/core/framework/tensor_testutil.h"
 #include "tensorflow/core/framework/types.h"
@@ -45,7 +45,7 @@ void TestRequantizeMany(Eigen::ThreadPoolDevice* eigen_device, float input_min,
   }
 
   Tensor i_tensor =
-      tensorflow::test::AsTensor(gtl::ArraySlice<qint32>(values_quantized));
+      tensorflow::test::AsTensor(absl::Span<const qint32>(values_quantized));
   Tensor o_tensor(DT_QUINT8, TensorShape{values_count});
   auto output_values = o_tensor.flat<quint8>();
 
@@ -60,7 +60,7 @@ void TestRequantizeMany(Eigen::ThreadPoolDevice* eigen_device, float input_min,
         &o_tensor);
   }
 
-  const string tolerance_str = strings::StrCat("+-", tolerance);
+  const std::string tolerance_str = absl::StrCat("+-", tolerance);
   for (size_t value_index = 0; value_index < values_count; ++value_index) {
     int e = expected_values[value_index];
     int v = output_values(value_index);
@@ -86,20 +86,20 @@ void TestRequantizeMany8To32Bit(float input_min, float input_max,
         output_min, output_max));
   }
 
-  Tensor i_tensor =
-      tensorflow::test::AsTensor(gtl::ArraySlice<quint8>(values_quantized));
+  const Tensor i_tensor =
+      tensorflow::test::AsTensor(absl::Span<const quint8>(values_quantized));
   Tensor o_tensor(DT_QINT32, TensorShape{values_count});
   auto output_values = o_tensor.flat<qint32>();
 
-  auto input_array = i_tensor.flat<quint8>();
+  const auto input_array = i_tensor.flat<quint8>();
   RequantizeManyInNewRange(input_array.data(), input_array.size(), input_min,
                            input_max, output_min, output_max,
                            output_values.data());
 
-  const string tolerance_str = strings::StrCat("+-", tolerance);
-  for (size_t value_index = 0; value_index < values_count; ++value_index) {
-    int e = expected_values[value_index];
-    int v = output_values(value_index);
+  const std::string tolerance_str = absl::StrCat("+-", tolerance);
+  for (int value_index = 0; value_index < values_count; ++value_index) {
+    const qint32 e = expected_values[value_index];
+    const qint32 v = output_values(value_index);
     ASSERT_TRUE(std::abs(e - v) <= tolerance)
         << "actual=" << v << ", expected=" << e << tolerance_str
         << ", values_quantized[" << value_index
@@ -143,7 +143,7 @@ void TestRequantizeManyInNewRange32To8Bit(
     qint32 high = Eigen::NumTraits<qint32>::highest();
     std::vector<qint32> vals{low, high};
     int num_steps = 14419;
-    qint32 step = static_cast<int32>((1LL << 32) / num_steps);
+    qint32 step = static_cast<int32_t>((1LL << 32) / num_steps);
     qint32 v = low + static_cast<qint32>(1);
     for (int i = 0; i < num_steps; ++i) {
       vals.push_back(v);
@@ -167,7 +167,7 @@ void TestRequantizeManyInNewRange32To8Bit(
   qint32 high = FloatToQuantized<qint32>(out_max, in_min, in_max);
   std::vector<qint32> vals;
   vals.clear();
-  for (int32 i = low; i <= high; ++i) vals.push_back(i);
+  for (int32_t i = low; i <= high; ++i) vals.push_back(i);
   TestRequantizeMany(eigen_device, in_min, in_max, out_min, out_max, vals);
 }
 
@@ -212,8 +212,8 @@ void TestRequantizeManyInNewRange8To32Bit() {
 template <typename InputType, typename OutputType>
 void TestRequantizeManyInNewRangeEigenVsNonEigen() {
   thread::ThreadPool threadpool(Env::Default(), "test", 2 /* num_threads */);
-  EigenThreadPoolWrapper wrapper(&threadpool);
-  Eigen::ThreadPoolDevice eigen_device(&wrapper, 2 /* num_threads */);
+  Eigen::ThreadPoolDevice eigen_device(threadpool.AsEigenThreadPool(),
+                                       2 /* num_threads */);
 
   const size_t ranges_count = 6;
   const float ranges[ranges_count][4] = {
@@ -277,7 +277,7 @@ void TestRequantizeManyInNewRangeEigenVsNonEigen() {
 }
 
 template <typename InputType, typename OutputType>
-void TimeRequantizeManyInNewRange(int64 num_elements, int64 iterations,
+void TimeRequantizeManyInNewRange(int64_t num_elements, int64_t iterations,
                                   bool use_eigen) {
   const float input_min = -100.0f;
   const float input_max = 100.0f;
@@ -294,8 +294,8 @@ void TimeRequantizeManyInNewRange(int64 num_elements, int64 iterations,
   }
 
   thread::ThreadPool threadpool(Env::Default(), "test", 4 /* num_threads */);
-  EigenThreadPoolWrapper wrapper(&threadpool);
-  Eigen::ThreadPoolDevice eigen_device(&wrapper, 4 /* num_threads */);
+  Eigen::ThreadPoolDevice eigen_device(threadpool.AsEigenThreadPool(),
+                                       4 /* num_threads */);
 
   Tensor i_tensor =
       tensorflow::test::AsTensor(gtl::ArraySlice<InputType>(values_quantized));
@@ -306,9 +306,9 @@ void TimeRequantizeManyInNewRange(int64 num_elements, int64 iterations,
                       TensorShape{num_elements});
   auto output_values_ref = o_tensor_ref.flat<OutputType>();
 
-  int64 total_duration = 0;
+  int64_t total_duration = 0;
   for (int i = 0; i < iterations; ++i) {
-    const int64 start_time = Env::Default()->NowMicros();
+    const int64_t start_time = Env::Default()->NowMicros();
     if (use_eigen) {
       RequantizeManyInNewRangeUsingEigen<InputType, OutputType>(
           eigen_device, i_tensor, input_min, input_max, output_min, output_max,
@@ -318,12 +318,12 @@ void TimeRequantizeManyInNewRange(int64 num_elements, int64 iterations,
           i_array.data(), i_array.size(), input_min, input_max, output_min,
           output_max, output_values_ref.data());
     }
-    const int64 end_time = Env::Default()->NowMicros();
+    const int64_t end_time = Env::Default()->NowMicros();
     total_duration += end_time - start_time;
   }
-  const int64 one_run_duration = total_duration / iterations;
+  const int64_t one_run_duration = total_duration / iterations;
 
-  const int64 num_ops = num_elements;
+  const int64_t num_ops = num_elements;
 
   const double million_ops_per_second =
       (iterations * num_ops) / static_cast<double>(total_duration);
@@ -363,8 +363,8 @@ void TestFloatToQuantizedInPlaceUsingEigen(
 
     const int tolerance = 1;
     for (int i = 0; i < values_count; ++i) {
-      int32 expected = FloatToQuantized<T>(input_array(i), f_min, f_max);
-      int32 actual = output_array(i);
+      int32_t expected = FloatToQuantized<T>(input_array(i), f_min, f_max);
+      int32_t actual = output_array(i);
 
       // The eigen computation uses float for constants and computation
       // instead
@@ -385,8 +385,12 @@ void TestQuantizedToFloatInPlaceUsingEigen(
   // These are the float values we're going to test the conversions on.
   typedef std::pair<float, float> FPair;
   for (FPair min_and_max : std::vector<FPair>{
-           FPair(-255.0f, 255.0f), FPair(-1.0f, 1.0f), FPair(-1.0f, 255.0f),
-           FPair(0.0f, 1e6), FPair(0.0f, 1.0f), FPair(-31.0f, 13.0f),
+           FPair(-255.0f, 255.0f),
+           FPair(-1.0f, 1.0f),
+           FPair(-1.0f, 255.0f),
+           FPair(0.0f, 1e6),
+           FPair(0.0f, 1.0f),
+           FPair(-31.0f, 13.0f),
            FPair(-5.89505e+08, 5.89505e+08),
        }) {
     const float f_min = min_and_max.first;
@@ -400,10 +404,10 @@ void TestQuantizedToFloatInPlaceUsingEigen(
       if (sizeof(T) == 1) {
         input_array(i) = Eigen::NumTraits<T>::lowest() + i;
       } else {
-        int64 offset = static_cast<int64>(q_range / values_count * i);
-        input_array(i) = static_cast<int32>(
-            std::min<int64>(Eigen::NumTraits<T>::lowest() + offset,
-                            Eigen::NumTraits<T>::highest()));
+        int64_t offset = static_cast<int64_t>(q_range / values_count * i);
+        input_array(i) = static_cast<int32_t>(
+            std::min<int64_t>(Eigen::NumTraits<T>::lowest() + offset,
+                              Eigen::NumTraits<T>::highest()));
       }
     }
 
@@ -495,7 +499,7 @@ void TestAvoidBias() {
   const float step_size = (max - min) / 255.0f;
   const float tolerance = step_size / 1000.0f;
   // This is the smallest perfectly representable float in the range.
-  float first_float = ceil(min / step_size) * step_size;
+  float first_float = std::ceil(min / step_size) * step_size;
   for (float f = first_float; f <= max; f += step_size) {
     const int as_int = FloatToQuantized<quint8>(f, min, max);
     const float back_to_float = QuantizedToFloat<quint8>(as_int, min, max);
@@ -602,8 +606,8 @@ void TestRequantizeManyInNewRange32To8Bit() {
 
 void TestRequantizeManyInNewRange32To8BitUsingEigen() {
   thread::ThreadPool threadpool(Env::Default(), "test", 2 /* num_threads */);
-  EigenThreadPoolWrapper wrapper(&threadpool);
-  Eigen::ThreadPoolDevice eigen_device(&wrapper, 2 /* num_threads */);
+  Eigen::ThreadPoolDevice eigen_device(threadpool.AsEigenThreadPool(),
+                                       2 /* num_threads */);
   TestRequantizeManyInNewRange32To8Bit(&eigen_device);
 }
 
@@ -633,8 +637,8 @@ void TestFloatTensorToQuantized() {
 // FloatToQuantized.
 void TestFloatToQuantizedInPlaceUsingEigen() {
   thread::ThreadPool threadpool(Env::Default(), "test", 2 /* num_threads */);
-  EigenThreadPoolWrapper wrapper(&threadpool);
-  Eigen::ThreadPoolDevice eigen_device(&wrapper, 2 /* num_threads */);
+  Eigen::ThreadPoolDevice eigen_device(threadpool.AsEigenThreadPool(),
+                                       2 /* num_threads */);
 
   TestFloatToQuantizedInPlaceUsingEigen<quint8>(&eigen_device);
   TestFloatToQuantizedInPlaceUsingEigen<qint8>(&eigen_device);
@@ -644,8 +648,8 @@ void TestFloatToQuantizedInPlaceUsingEigen() {
 
 void TestOverflowWithEigen() {
   thread::ThreadPool threadpool(Env::Default(), "test", 2 /* num_threads */);
-  EigenThreadPoolWrapper wrapper(&threadpool);
-  Eigen::ThreadPoolDevice eigen_device(&wrapper, 2 /* num_threads */);
+  Eigen::ThreadPoolDevice eigen_device(threadpool.AsEigenThreadPool(),
+                                       2 /* num_threads */);
 
   const int num_vals = 4;
   const float input_min = 0.0f;
@@ -658,8 +662,8 @@ void TestOverflowWithEigen() {
   // because the implementation does a bounds check using float, not int32.
   test::FillValues<qint32>(
       &expected,
-      {static_cast<int32>(-2147483648), static_cast<int32>(-2147483648),
-       static_cast<int32>(2147483520), static_cast<int32>(2147483520)});
+      {static_cast<int32_t>(-2147483648), static_cast<int32_t>(-2147483648),
+       static_cast<int32_t>(2147483520), static_cast<int32_t>(2147483520)});
 
   FloatToQuantizedStruct<qint32> f2q(input_min, input_max);
   Tensor output(DT_QINT32, shape);
@@ -690,7 +694,7 @@ void TestQuantizedTensorToFloat() {
 
   // Use a quantizer centered at 0.
   float input_range = 1LL << 25;
-  int64 num_levels = (1LL << 32) - 1;
+  int64_t num_levels = (1LL << 32) - 1;
   float step_size =
       static_cast<float>(static_cast<double>(input_range) / num_levels);
   float q_compatible_min_value =
@@ -712,8 +716,8 @@ void TestQuantizedTensorToFloat() {
 // QuantizedToFloat.
 void TestQuantizedToFloatInPlaceUsingEigen() {
   thread::ThreadPool threadpool(Env::Default(), "test", 2 /* num_threads */);
-  EigenThreadPoolWrapper wrapper(&threadpool);
-  Eigen::ThreadPoolDevice eigen_device(&wrapper, 2 /* num_threads */);
+  Eigen::ThreadPoolDevice eigen_device(threadpool.AsEigenThreadPool(),
+                                       2 /* num_threads */);
 
   TestQuantizedToFloatInPlaceUsingEigen<quint8>(&eigen_device);
   TestQuantizedToFloatInPlaceUsingEigen<qint8>(&eigen_device);
@@ -738,40 +742,215 @@ void BenchmarkRequantizeManyInNewRange() {
   TimeRequantizeManyInNewRange<quint8, qint32>(1000000, 10, true);
 }
 
+#ifdef QUANTIZATION_UTILS_USE_NEON
+template <int POW>
+void TestDivide64x2Pow(int64 val, int64 ref) {
+  const int64x2_t val_64x2 = vmovq_n_s64(val);
+  const int64x2_t ret = Divide64x2Pow<POW>(val_64x2);
+  // TODO(b/70947959) Change back to int64 when possible
+  int64_t rets[2];
+  vst1q_s64(rets, ret);
+  EXPECT_EQ(rets[0], ref);
+  EXPECT_EQ(rets[1], ref);
+  VLOG(1) << "div: val " << val << ", " << ref;
+}
+
+template <int POW>
+void TestDivide64x2PowRound(int64 val, int64 ref) {
+  const int64x2_t val_64x2 = vmovq_n_s64(val);
+  const int64x2_t shifted = Divide64x2PowRound<POW>(val_64x2);
+  // TODO(b/70947959) Change back to int64 when possible
+  int64_t rets[2];
+  vst1q_s64(rets, shifted);
+  EXPECT_EQ(rets[0], ref) << "in = " << val << ", " << POW
+                          << ", act = " << rets[0] << ", ref = " << ref;
+  EXPECT_EQ(rets[1], ref);
+  VLOG(1) << "div round: " << val << ", " << rets[0];
+}
+
+void TestDivide64x2PowAll() {
+  for (int64 i = 0; i < 1000; ++i) {
+    TestDivide64x2PowRound<1>(
+        i, static_cast<int64_t>(static_cast<float>(i) / 2.0f + 0.5f));
+    TestDivide64x2PowRound<1>(
+        -i, static_cast<int64_t>(static_cast<float>(-i) / 2.0f - 0.5f));
+    TestDivide64x2PowRound<2>(
+        i, static_cast<int64_t>(static_cast<float>(i) / 4.0f + 0.5f));
+    TestDivide64x2PowRound<2>(
+        -i, static_cast<int64_t>(static_cast<float>(-i) / 4.0f - 0.5f));
+    TestDivide64x2PowRound<4>(
+        i, static_cast<int64_t>(static_cast<float>(i) / 16.0f + 0.5f));
+    TestDivide64x2PowRound<4>(
+        -i, static_cast<int64_t>(static_cast<float>(-i) / 16.0f - 0.5f));
+    TestDivide64x2PowRound<8>(
+        i, static_cast<int64_t>(static_cast<float>(i) / 256.0f + 0.5f));
+    TestDivide64x2PowRound<8>(
+        -i, static_cast<int64_t>(static_cast<float>(-i) / 256.0f - 0.5f));
+    TestDivide64x2PowRound<16>(
+        i, static_cast<int64_t>(static_cast<float>(i) / 65536.0f + 0.5f));
+    TestDivide64x2PowRound<16>(
+        -i, static_cast<int64_t>(static_cast<float>(-i) / 65536.0f - 0.5f));
+  }
+
+  TestDivide64x2Pow<2>(100, 25);
+  TestDivide64x2Pow<2>(-100, -25);
+  TestDivide64x2Pow<4>(100, 6);
+  TestDivide64x2Pow<4>(-100, -6);
+
+  for (int64 i = 0; i < 1000; ++i) {
+    TestDivide64x2Pow<1>(i, i / 2);
+    TestDivide64x2Pow<1>(-i, -i / 2);
+    TestDivide64x2Pow<2>(i, i / 4);
+    TestDivide64x2Pow<2>(-i, -i / 4);
+    TestDivide64x2Pow<4>(i, i / 16);
+    TestDivide64x2Pow<4>(-i, -i / 16);
+    TestDivide64x2Pow<8>(i, i / 256);
+    TestDivide64x2Pow<8>(-i, -i / 256);
+    TestDivide64x2Pow<16>(i, i / 65536);
+    TestDivide64x2Pow<16>(-i, -i / 65536);
+  }
+}
+
+uint8x8_t To8x8(uint8 val) { return vmov_n_u8(val); }
+
+int16x8_t To16x8(int16 val) { return vmovq_n_s16(val); }
+
+int32x2_t To32x2(int32 val) {
+  int32 vals[2];
+  vals[0] = val;
+  vals[1] = val;
+  return vld1_s32(vals);
+}
+
+template <int RESOLUTION, typename T_CALC>
+T_CALC ComputeRefLerp(T_CALC top_left, T_CALC top_right, T_CALC bottom_left,
+                      T_CALC bottom_right, T_CALC x_lerp, T_CALC y_lerp) {
+  constexpr T_CALC RESOLUTION_POW = (1 << RESOLUTION);
+  const T_CALC top =
+      top_left * RESOLUTION_POW + (top_right - top_left) * x_lerp;
+  const T_CALC bottom =
+      bottom_left * RESOLUTION_POW + (bottom_right - bottom_left) * x_lerp;
+  const T_CALC out = top + (bottom - top) / RESOLUTION_POW * y_lerp;
+  return (out + RESOLUTION_POW / 2) / RESOLUTION_POW;
+}
+
+template <int RESOLUTION>
+void TestComputeLerp8x8(uint8 top_left, uint8 top_right, uint8 bottom_left,
+                        uint8 bottom_right, int16 x_lerp, int16 y_lerp) {
+  uint8x8_t top_left8x8 = To8x8(top_left);
+  uint8x8_t top_right8x8 = To8x8(top_right);
+  uint8x8_t bottom_left8x8 = To8x8(bottom_left);
+  uint8x8_t bottom_right8x8 = To8x8(bottom_right);
+  int16x8_t x_lerp16x8 = To16x8(x_lerp);
+  int16x8_t y_lerp16x8 = To16x8(y_lerp);
+  const uint8x8_t ret =
+      ComputeLerp8x8<RESOLUTION>(top_left8x8, top_right8x8, bottom_left8x8,
+                                 bottom_right8x8, x_lerp16x8, y_lerp16x8);
+
+  uint8 rets[8];
+  vst1_u8(rets, ret);
+
+  const int16 ref = ComputeRefLerp<RESOLUTION, int16>(
+      static_cast<int16>(top_left), static_cast<int16>(top_right),
+      static_cast<int16>(bottom_left), static_cast<int16>(bottom_right), x_lerp,
+      y_lerp);
+
+  for (int i = 0; i < 8; ++i) {
+    EXPECT_EQ(ref, static_cast<int16>(rets[i]));
+  }
+
+  VLOG(1) << "Lerp(8): " << static_cast<int>(top_left) << ", "
+          << static_cast<int>(top_right) << ", "
+          << static_cast<int>(bottom_left) << ", "
+          << static_cast<int>(bottom_right) << ", " << x_lerp << ", " << y_lerp
+          << ", " << static_cast<int>(rets[0]) << ", " << ref;
+}
+
+template <int RESOLUTION>
+void TestComputeLerp32x2(int32 top_left, int32 top_right, int32 bottom_left,
+                         int32 bottom_right, int32 x_lerp, int32 y_lerp) {
+  int32x2_t top_left32x2 = To32x2(top_left);
+  int32x2_t top_right32x2 = To32x2(top_right);
+  int32x2_t bottom_left32x2 = To32x2(bottom_left);
+  int32x2_t bottom_right32x2 = To32x2(bottom_right);
+  int32x2_t x_lerp32x2 = To32x2(x_lerp);
+  int32x2_t y_lerp32x2 = To32x2(y_lerp);
+  const int32x2_t ret =
+      ComputeLerp32x2<RESOLUTION>(top_left32x2, top_right32x2, bottom_left32x2,
+                                  bottom_right32x2, x_lerp32x2, y_lerp32x2);
+  int32 rets[2];
+  vst1_s32(rets, ret);
+  const int64 ref = ComputeRefLerp<RESOLUTION, int64>(
+      static_cast<int64_t>(top_left), static_cast<int64_t>(top_right),
+      static_cast<int64_t>(bottom_left), static_cast<int64_t>(bottom_right),
+      static_cast<int64_t>(x_lerp), static_cast<int64_t>(y_lerp));
+  EXPECT_EQ(static_cast<int64_t>(rets[0]), ref);
+  VLOG(1) << "Lerp(32): " << top_left << ", " << top_right << ", "
+          << bottom_left << ", " << bottom_right << ", " << x_lerp << ", "
+          << y_lerp << ", " << rets[0] << ", " << ref;
+}
+
+void TestComputeLerp4xAll() {
+  constexpr int32 RESOLUTION_32 = 30;
+  constexpr int32 RESOLUTION_MULT_32 = (1 << RESOLUTION_32);
+  constexpr int32 HALF_32 = RESOLUTION_MULT_32 / 2;
+  TestComputeLerp32x2<RESOLUTION_32>(100, 200, 300, 400, HALF_32, HALF_32);
+  TestComputeLerp32x2<RESOLUTION_32>(100, 100, 200, 200, HALF_32, HALF_32);
+  TestComputeLerp32x2<RESOLUTION_32>(200, 200, 100, 100, HALF_32, HALF_32);
+  TestComputeLerp32x2<RESOLUTION_32>(100, 200, 100, 200, HALF_32, HALF_32);
+  TestComputeLerp32x2<RESOLUTION_32>(200, 100, 200, 100, HALF_32, HALF_32);
+  TestComputeLerp32x2<RESOLUTION_32>(200, 200, 200, 200, HALF_32, HALF_32);
+
+  constexpr int32 RESOLUTION_8 = 7;
+  constexpr int32 RESOLUTION_MULT_8 = (1 << RESOLUTION_8);
+  constexpr int32 HALF_8 = RESOLUTION_MULT_8 / 2;
+  TestComputeLerp8x8<RESOLUTION_8>(10, 20, 30, 40, HALF_8, HALF_8);
+  TestComputeLerp8x8<RESOLUTION_8>(100, 100, 200, 200, HALF_8, HALF_8);
+  TestComputeLerp8x8<RESOLUTION_8>(200, 200, 100, 100, HALF_8, HALF_8);
+  TestComputeLerp8x8<RESOLUTION_8>(100, 200, 100, 200, HALF_8, HALF_8);
+  TestComputeLerp8x8<RESOLUTION_8>(200, 100, 200, 100, HALF_8, HALF_8);
+  TestComputeLerp8x8<RESOLUTION_8>(200, 200, 200, 200, HALF_8, HALF_8);
+}
+
+#endif
+
 }  // namespace tensorflow
 
-#if defined(__ANDROID__)
-int main(int argc, char** argv) {
-#define RUN_TEST(t)            \
-  LOG(INFO) << "Test: " << #t; \
-  tensorflow::t();
-#else
 #define RUN_TEST(t) \
   TEST(QuantizationUtilsTest, t) { tensorflow::t(); }
-#endif
 
-  RUN_TEST(TestFloatToQuantized);
-  RUN_TEST(TestQuantizedToFloat);
-  RUN_TEST(TestAvoidBias);
-  RUN_TEST(TestRequantizeInNewRange);
-  RUN_TEST(TestRequantizeInNewRangeRealData);
-  RUN_TEST(TestRequantizeInNewRange32To8Bit);
-  RUN_TEST(TestRequantizeManyInNewRange32To8Bit);
-  RUN_TEST(TestRequantizeManyInNewRange32To8BitUsingEigen);
-  RUN_TEST(TestRequantizeManyInNewRange32To8BitEigenVsNonEigen);
-  RUN_TEST(TestRequantizeManyInNewRange32To8BitSignedEigenVsNonEigen);
-  RUN_TEST(TestFloatTensorToQuantized);
-  RUN_TEST(TestRequantizeManyInNewRange8To32Bit);
-  RUN_TEST(TestFloatToQuantizedInPlaceUsingEigen);
-  RUN_TEST(TestOverflowWithEigen);
-  RUN_TEST(TestQuantizedTensorToFloat);
-  RUN_TEST(TestQuantizedToFloatInPlaceUsingEigen);
+RUN_TEST(TestFloatToQuantized);
+RUN_TEST(TestQuantizedToFloat);
+RUN_TEST(TestAvoidBias);
+RUN_TEST(TestRequantizeInNewRange);
+RUN_TEST(TestRequantizeInNewRangeRealData);
+RUN_TEST(TestRequantizeInNewRange32To8Bit);
+RUN_TEST(TestRequantizeManyInNewRange32To8Bit);
+RUN_TEST(TestRequantizeManyInNewRange32To8BitUsingEigen);
+RUN_TEST(TestRequantizeManyInNewRange32To8BitEigenVsNonEigen);
+RUN_TEST(TestRequantizeManyInNewRange32To8BitSignedEigenVsNonEigen);
+RUN_TEST(TestFloatTensorToQuantized);
+RUN_TEST(TestRequantizeManyInNewRange8To32Bit);
+RUN_TEST(TestFloatToQuantizedInPlaceUsingEigen);
+RUN_TEST(TestOverflowWithEigen);
+RUN_TEST(TestQuantizedTensorToFloat);
+RUN_TEST(TestQuantizedToFloatInPlaceUsingEigen);
 
 #if defined(__ANDROID__)
 
-  tensorflow::BenchmarkRequantizeManyInNewRange();
+RUN_TEST(BenchmarkRequantizeManyInNewRange);
 
-  LOG(INFO) << "All tests complete.";
-  return 0;
+#ifdef QUANTIZATION_UTILS_USE_NEON
+
+RUN_TEST(TestDivide64x2PowAll);
+RUN_TEST(TestComputeLerp4xAll);
+
+#endif  // QUANTIZATION_UTILS_USE_NEON
+
+#endif  // __ANDROID__
+
+int main(int argc, char** argv) {
+  // On Linux, add: absl::SetFlag(&FLAGS_logtostderr, true);
+  ::testing::InitGoogleTest(&argc, argv);
+  return RUN_ALL_TESTS();
 }
-#endif

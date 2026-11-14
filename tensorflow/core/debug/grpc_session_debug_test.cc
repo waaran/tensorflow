@@ -15,6 +15,8 @@ limitations under the License.
 
 #include "tensorflow/core/distributed_runtime/rpc/grpc_session.h"
 
+#include <memory>
+
 #include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/debug/debug_io_utils.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_testlib.h"
@@ -25,7 +27,6 @@ limitations under the License.
 #include "tensorflow/core/graph/default_device.h"
 #include "tensorflow/core/graph/graph.h"
 #include "tensorflow/core/graph/testlib.h"
-#include "tensorflow/core/lib/core/error_codes.pb.h"
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/lib/strings/strcat.h"
@@ -34,20 +35,21 @@ limitations under the License.
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/protobuf/debug.pb.h"
-#include "tensorflow/core/protobuf/master.pb.h"
+#include "tensorflow/core/protobuf/rewriter_config.pb.h"
 #include "tensorflow/core/public/session.h"
 #include "tensorflow/core/util/port.h"
 
 namespace tensorflow {
+namespace {
 
-static SessionOptions Devices(int num_cpus, int num_gpus) {
+SessionOptions Devices(int num_cpus, int num_gpus) {
   SessionOptions result;
   (*result.config.mutable_device_count())["CPU"] = num_cpus;
   (*result.config.mutable_device_count())["GPU"] = num_gpus;
   return result;
 }
 
-void CreateGraphDef(GraphDef* graph_def, string node_names[3]) {
+void CreateGraphDef(GraphDef* graph_def, std::string node_names[3]) {
   Graph graph(OpRegistry::Global());
 
   Tensor a_tensor(DT_FLOAT, TensorShape({1, 2}));
@@ -69,26 +71,29 @@ void CreateGraphDef(GraphDef* graph_def, string node_names[3]) {
 
 // Asserts that "val" is a single float tensor. The only float is
 // "expected_val".
-static void IsSingleFloatValue(const Tensor& val, float expected_val) {
+void IsSingleFloatValue(const Tensor& val, float expected_val) {
   ASSERT_EQ(val.dtype(), DT_FLOAT);
   ASSERT_EQ(val.NumElements(), 1);
   ASSERT_EQ(val.flat<float>()(0), expected_val);
 }
 
-static SessionOptions Options(const string& target, int placement_period) {
+SessionOptions Options(const std::string& target, int placement_period) {
   SessionOptions options;
   // NOTE(mrry): GrpcSession requires a grpc:// scheme prefix in the target
   // string.
-  options.target = strings::StrCat("grpc://", target);
+  options.target = absl::StrCat("grpc://", target);
   options.config.set_placement_period(placement_period);
   options.config.mutable_graph_options()
       ->mutable_optimizer_options()
       ->set_opt_level(OptimizerOptions::L0);
+  options.config.mutable_graph_options()
+      ->mutable_rewrite_options()
+      ->set_constant_folding(RewriterConfig::OFF);
   return options;
 }
 
-static Session* NewRemote(const SessionOptions& options) {
-  return CHECK_NOTNULL(NewSession(options));
+std::unique_ptr<Session> NewRemote(const SessionOptions& options) {
+  return std::unique_ptr<Session>(CHECK_NOTNULL(NewSession(options)));
 }
 
 class GrpcSessionDebugTest : public ::testing::Test {
@@ -99,8 +104,8 @@ class GrpcSessionDebugTest : public ::testing::Test {
 
   void DeleteDumpDir() {
     if (Env::Default()->IsDirectory(dump_dir_).ok()) {
-      int64 undeleted_files = 0;
-      int64 undeleted_dirs = 0;
+      int64_t undeleted_files = 0;
+      int64_t undeleted_dirs = 0;
       ASSERT_TRUE(
           Env::Default()
               ->DeleteRecursively(dump_dir_, &undeleted_files, &undeleted_dirs)
@@ -110,18 +115,19 @@ class GrpcSessionDebugTest : public ::testing::Test {
     }
   }
 
-  const string GetDebugURL() { return debug_url_; }
+  const std::string GetDebugURL() { return debug_url_; }
 
-  void LoadTensorDumps(const string& subdir, std::vector<Tensor>* tensors) {
-    const string dirpath = io::JoinPath(dump_dir_, subdir);
+  void LoadTensorDumps(const std::string& subdir,
+                       std::vector<Tensor>* tensors) {
+    const std::string dirpath = io::JoinPath(dump_dir_, subdir);
     if (!(Env::Default()->IsDirectory(dirpath).ok())) {
       return;
     }
 
-    std::vector<string> filenames;
+    std::vector<std::string> filenames;
     TF_ASSERT_OK(Env::Default()->GetChildren(dirpath, &filenames));
 
-    for (const string& filename : filenames) {
+    for (const std::string& filename : filenames) {
       Event event;
       TF_ASSERT_OK(ReadEventFromFile(io::JoinPath(dirpath, filename), &event));
       if (event.summary().value().size() == 1) {
@@ -136,24 +142,26 @@ class GrpcSessionDebugTest : public ::testing::Test {
   void CreateDumpDir() {
     char dir_template[] = "/tmp/tfdbg_grpc_sessions_XXXXXX";
     dump_dir_ = mkdtemp(dir_template);
-    debug_url_ = strings::StrCat("file://", dump_dir_);
+    debug_url_ = absl::StrCat("file://", dump_dir_);
   }
 
-  string dump_dir_;
-  string debug_url_;
+  std::string dump_dir_;
+  std::string debug_url_;
 };
 
 TEST_F(GrpcSessionDebugTest, FileDebugURL) {
   GraphDef graph;
-  string node_names[3];
+  std::string node_names[3];
   CreateGraphDef(&graph, node_names);
 
   std::unique_ptr<test::TestCluster> cluster;
-  TF_CHECK_OK(test::TestCluster::MakeTestCluster(Devices(1, 0), 2, &cluster));
+  TF_CHECK_OK(test::TestCluster::MakeTestCluster(
+      test::TestClusterConfig()
+          .Options(Devices(1, 0))
+          .Jobs({test::TestJob{/*name=*/"localhost", /*num_tasks=*/2}}),
+      &cluster));
 
-  std::unique_ptr<Session> session(
-      NewRemote(Options(cluster->targets()[0], 1)));
-  ASSERT_TRUE(session != nullptr);
+  auto session = NewRemote(Options(cluster->targets()[0], 1));
   TF_CHECK_OK(session->Create(graph));
 
   // Iteration 0: No watch.
@@ -187,7 +195,10 @@ TEST_F(GrpcSessionDebugTest, FileDebugURL) {
     IsSingleFloatValue(outputs[0], 4.0);
 
     std::vector<Tensor> dumped_tensors;
-    LoadTensorDumps("n", &dumped_tensors);
+    LoadTensorDumps(io::JoinPath(DebugNodeKey::DeviceNameToDevicePath(
+                                     cluster->devices()[0].name()),
+                                 "n"),
+                    &dumped_tensors);
 
     if (i == 0 || i == 5) {
       ASSERT_EQ(0, dumped_tensors.size());
@@ -206,7 +217,8 @@ TEST_F(GrpcSessionDebugTest, FileDebugURL) {
   TF_CHECK_OK(session->Close());
 }
 
-void SetDevice(GraphDef* graph, const string& name, const string& dev) {
+void SetDevice(GraphDef* graph, const std::string& name,
+               const std::string& dev) {
   for (size_t i = 0; i < graph->node_size(); ++i) {
     if (graph->node(i).name() == name) {
       graph->mutable_node(i)->set_device(dev);
@@ -218,16 +230,18 @@ void SetDevice(GraphDef* graph, const string& name, const string& dev) {
 
 TEST_F(GrpcSessionDebugTest, MultiDevices_String) {
   std::unique_ptr<test::TestCluster> cluster;
-  TF_CHECK_OK(test::TestCluster::MakeTestCluster(Devices(1, 1), 2, &cluster));
-  std::unique_ptr<Session> session(
-      NewRemote(Options(cluster->targets()[0], 1000)));
-  ASSERT_TRUE(session != nullptr);
+  TF_CHECK_OK(test::TestCluster::MakeTestCluster(
+      test::TestClusterConfig()
+          .Options(Devices(1, 1))
+          .Jobs({test::TestJob{/*name=*/"localhost", /*num_tasks=*/2}}),
+      &cluster));
+  auto session = NewRemote(Options(cluster->targets()[0], 1000));
 
   // b = a
   Graph graph(OpRegistry::Global());
   Tensor a_tensor(DT_STRING, TensorShape({2, 2}));
   for (size_t i = 0; i < 4; ++i) {
-    a_tensor.flat<string>()(i) = "hello, world";
+    a_tensor.flat<tstring>()(i) = "hello, world";
   }
   Node* a = test::graph::Constant(&graph, a_tensor);
   Node* b = test::graph::Identity(&graph, a);
@@ -243,7 +257,7 @@ TEST_F(GrpcSessionDebugTest, MultiDevices_String) {
       SetDevice(&def, a->name(), a_dev.name());
       SetDevice(&def, b->name(), b_dev.name());
 
-      Status s = session->Create(def);
+      absl::Status s = session->Create(def);
       if (s.ok()) {
         std::vector<Tensor> outputs;
 
@@ -262,20 +276,24 @@ TEST_F(GrpcSessionDebugTest, MultiDevices_String) {
         ASSERT_EQ(outputs[0].dtype(), DT_STRING);
         ASSERT_EQ(outputs[0].NumElements(), 4);
         for (size_t i = 0; i < outputs[0].NumElements(); ++i) {
-          EXPECT_EQ(outputs[0].flat<string>()(i), "hello, world");
+          EXPECT_EQ(outputs[0].flat<tstring>()(i), "hello, world");
         }
         TF_CHECK_OK(session->Close());
 
         std::vector<Tensor> dumped_tensors;
-        LoadTensorDumps("n", &dumped_tensors);
+        LoadTensorDumps(
+            io::JoinPath(DebugNodeKey::DeviceNameToDevicePath(a_dev.name()),
+                         "n"),
+            &dumped_tensors);
         ASSERT_EQ(1, dumped_tensors.size());
         ASSERT_EQ(TensorShape({2, 2}), dumped_tensors[0].shape());
         for (size_t i = 0; i < 4; ++i) {
-          ASSERT_EQ("hello, world", dumped_tensors[0].flat<string>()(i));
+          ASSERT_EQ("hello, world", dumped_tensors[0].flat<tstring>()(i));
         }
 
         DeleteDumpDir();
       } else {
+        // The CUDA device does not have an Identity op for strings
         LOG(ERROR) << "Error: " << s;
         ASSERT_TRUE((a_dev.device_type() == DEVICE_GPU) ||
                     (b_dev.device_type() == DEVICE_GPU));
@@ -285,4 +303,5 @@ TEST_F(GrpcSessionDebugTest, MultiDevices_String) {
   }
 }
 
+}  // namespace
 }  // namespace tensorflow

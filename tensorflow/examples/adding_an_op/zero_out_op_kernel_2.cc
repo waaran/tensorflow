@@ -14,6 +14,7 @@ limitations under the License.
 ==============================================================================*/
 
 #include "tensorflow/core/framework/common_shape_fns.h"
+#include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/shape_inference.h"
@@ -101,7 +102,7 @@ REGISTER_KERNEL_BUILDER(Name("ZeroOut")
 
 REGISTER_KERNEL(float);
 REGISTER_KERNEL(double);
-REGISTER_KERNEL(int32);
+REGISTER_KERNEL(int32_t);
 
 #undef REGISTER_KERNEL
 
